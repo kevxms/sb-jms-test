@@ -8,30 +8,46 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * JMS Test Client for Azure Service Bus Queue
+ * JMS Test Client for Azure Service Bus Queue/Topic
  * 
  * This test client:
  * - Connects to Azure Service Bus using JMS
- * - Sends test messages to a queue
- * - Receives messages from a queue
+ * - Sends test messages to a queue or topic
+ * - Receives messages from a queue or topic subscription
  * - Asserts that all sent messages are received
  */
 public class ServiceBusJmsClientTest {
 
     private final String connectionString;
-    private final String queueName;
+    private final String destinationName;
+    private final boolean useTopic;
+    private final String subscriptionName;
     private ConnectionFactory connectionFactory;
     private Connection connection;
 
     /**
-     * Creates a new ServiceBusJmsClientTest
+     * Creates a new ServiceBusJmsClientTest for queues
      * 
      * @param connectionString The Azure Service Bus connection string
      * @param queueName        The name of the queue to interact with
      */
     public ServiceBusJmsClientTest(String connectionString, String queueName) {
+        this(connectionString, queueName, false, null);
+    }
+
+    /**
+     * Creates a new ServiceBusJmsClientTest for queues or topics
+     * 
+     * @param connectionString  The Azure Service Bus connection string
+     * @param destinationName   The name of the queue or topic to interact with
+     * @param useTopic          True to use topic, false to use queue
+     * @param subscriptionName  The subscription name (required for topics)
+     */
+    public ServiceBusJmsClientTest(String connectionString, String destinationName, boolean useTopic, String subscriptionName) {
         this.connectionString = connectionString;
-        this.queueName = queueName;
+        this.destinationName = destinationName;
+        this.useTopic = useTopic;
+        this.subscriptionName = subscriptionName;
     }
 
     /**
@@ -49,14 +65,14 @@ public class ServiceBusJmsClientTest {
     }
 
     /**
-     * Sends a text message to the queue
+     * Sends a text message to the queue or topic
      * 
      * @param messageText The text content of the message
      */
     public void sendMessage(String messageText) throws JMSException {
         try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
-            Queue queue = session.createQueue(queueName);
-            MessageProducer producer = session.createProducer(queue);
+            Destination destination = useTopic ? session.createTopic(destinationName) : session.createQueue(destinationName);
+            MessageProducer producer = session.createProducer(destination);
             producer.setDeliveryMode(DeliveryMode.PERSISTENT);
 
             TextMessage message = session.createTextMessage(messageText);
@@ -67,7 +83,7 @@ public class ServiceBusJmsClientTest {
     }
 
     /**
-     * Sends a text message with custom properties to the queue
+     * Sends a text message with custom properties to the queue or topic
      * 
      * @param messageText The text content of the message
      * @param messageId   Custom message ID
@@ -75,8 +91,8 @@ public class ServiceBusJmsClientTest {
      */
     public void sendMessageWithProperties(String messageText, String messageId, int priority) throws JMSException {
         try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
-            Queue queue = session.createQueue(queueName);
-            MessageProducer producer = session.createProducer(queue);
+            Destination destination = useTopic ? session.createTopic(destinationName) : session.createQueue(destinationName);
+            MessageProducer producer = session.createProducer(destination);
             producer.setDeliveryMode(DeliveryMode.PERSISTENT);
             producer.setPriority(priority);
 
@@ -91,15 +107,23 @@ public class ServiceBusJmsClientTest {
     }
 
     /**
-     * Receives a single message from the queue (blocking with timeout)
+     * Receives a single message from the queue or topic subscription (blocking with timeout)
      * 
      * @param timeoutMs Timeout in milliseconds
      * @return The received message text, or null if no message available
      */
     public String receiveMessage(long timeoutMs) throws JMSException {
         try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
-            Queue queue = session.createQueue(queueName);
-            MessageConsumer consumer = session.createConsumer(queue);
+            MessageConsumer consumer;
+            if (useTopic) {
+                // For Azure Service Bus, consume from subscription using path format
+                String subscriptionPath = destinationName + "/Subscriptions/" + subscriptionName;
+                Queue subscriptionQueue = session.createQueue(subscriptionPath);
+                consumer = session.createConsumer(subscriptionQueue);
+            } else {
+                Queue queue = session.createQueue(destinationName);
+                consumer = session.createConsumer(queue);
+            }
 
             Message message = consumer.receive(timeoutMs);
 
@@ -125,11 +149,20 @@ public class ServiceBusJmsClientTest {
      */
     public Session setupAsyncReceiver(MessageListener listener) throws JMSException {
         Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        Queue queue = session.createQueue(queueName);
-        MessageConsumer consumer = session.createConsumer(queue);
+        MessageConsumer consumer;
+        if (useTopic) {
+            // For Azure Service Bus, consume from subscription using path format
+            String subscriptionPath = destinationName + "/Subscriptions/" + subscriptionName;
+            Queue subscriptionQueue = session.createQueue(subscriptionPath);
+            consumer = session.createConsumer(subscriptionQueue);
+            System.out.println("Async message listener set up for topic: " + destinationName + " (subscription: " + subscriptionName + ")");
+        } else {
+            Queue queue = session.createQueue(destinationName);
+            consumer = session.createConsumer(queue);
+            System.out.println("Async message listener set up for queue: " + destinationName);
+        }
         consumer.setMessageListener(listener);
 
-        System.out.println("Async message listener set up for queue: " + queueName);
         return session;
     }
 
@@ -171,18 +204,27 @@ public class ServiceBusJmsClientTest {
         // Parse CLI arguments
         String cliConnectionString = null;
         String cliQueueName = null;
+        String cliTopicName = null;
+        String cliSubscriptionName = null;
         
         for (int i = 0; i < args.length; i++) {
             if (("--connection-string".equals(args[i]) || "-c".equals(args[i])) && i + 1 < args.length) {
                 cliConnectionString = args[++i];
             } else if (("--queue-name".equals(args[i]) || "-q".equals(args[i])) && i + 1 < args.length) {
                 cliQueueName = args[++i];
+            } else if (("--topic-name".equals(args[i]) || "-t".equals(args[i])) && i + 1 < args.length) {
+                cliTopicName = args[++i];
+            } else if (("--subscription-name".equals(args[i]) || "-s".equals(args[i])) && i + 1 < args.length) {
+                cliSubscriptionName = args[++i];
             } else if ("--help".equals(args[i]) || "-h".equals(args[i])) {
                 System.out.println("Usage: java -jar azure-servicebus-jms-client-test.jar [options]");
                 System.out.println("Options:");
-                System.out.println("  -c, --connection-string <string>  Service Bus connection string (overrides SERVICEBUS_CONNECTION_STRING env var)");
-                System.out.println("  -q, --queue-name <name>           Queue name (overrides SERVICEBUS_QUEUE_NAME env var)");
-                System.out.println("  -h, --help                        Show this help message");
+                System.out.println("  -c, --connection-string <string>   Service Bus connection string (overrides SERVICEBUS_CONNECTION_STRING env var)");
+                System.out.println("  -q, --queue-name <name>            Queue name (overrides SERVICEBUS_QUEUE_NAME env var)");
+                System.out.println("  -t, --topic-name <name>            Topic name (overrides SERVICEBUS_TOPIC_NAME env var)");
+                System.out.println("  -s, --subscription-name <name>     Subscription name for topic (overrides SERVICEBUS_SUBSCRIPTION_NAME env var)");
+                System.out.println("  -h, --help                         Show this help message");
+                System.out.println("\nNote: Use either --queue-name OR --topic-name with --subscription-name, not both.");
                 System.exit(0);
             }
         }
@@ -198,38 +240,86 @@ public class ServiceBusJmsClientTest {
             connectionStringSource = "environment variable";
         }
 
-        // Determine queue name source
-        String queueName;
-        String queueNameSource;
-        if (cliQueueName != null && !cliQueueName.isEmpty()) {
-            queueName = cliQueueName;
-            queueNameSource = "CLI argument";
-        } else {
-            queueName = System.getenv("SERVICEBUS_QUEUE_NAME");
-            queueNameSource = "environment variable";
-        }
+        // Determine topic/queue settings
+        String topicName = cliTopicName != null ? cliTopicName : System.getenv("SERVICEBUS_TOPIC_NAME");
+        String subscriptionName = cliSubscriptionName != null ? cliSubscriptionName : System.getenv("SERVICEBUS_SUBSCRIPTION_NAME");
+        String queueName = cliQueueName != null ? cliQueueName : System.getenv("SERVICEBUS_QUEUE_NAME");
+        
+        boolean hasTopic = topicName != null && !topicName.isEmpty();
+        boolean hasQueue = queueName != null && !queueName.isEmpty();
 
         // Validate connection string
         if (connectionString == null || connectionString.isEmpty()) {
             System.err.println("Please provide the connection string via CLI argument or SERVICEBUS_CONNECTION_STRING environment variable");
-            System.err.println("Usage: java -jar azure-servicebus-jms-client-test.jar -c <connection-string> -q <queue-name>");
+            System.err.println("Usage: java -jar azure-servicebus-jms-client-test.jar -c <connection-string> [-q <queue-name>] [-t <topic-name> -s <subscription-name>]");
             System.err.println("Format: Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<keyname>;SharedAccessKey=<key>");
             System.exit(1);
         }
 
-        // Use default queue name if not specified
-        if (queueName == null || queueName.isEmpty()) {
+        // Validate topic subscription
+        if (hasTopic && (subscriptionName == null || subscriptionName.isEmpty())) {
+            System.err.println("Subscription name is required when using topics. Use -s or set SERVICEBUS_SUBSCRIPTION_NAME.");
+            System.exit(1);
+        }
+
+        // Use default queue if nothing specified
+        if (!hasTopic && !hasQueue) {
             queueName = "test-queue";
-            queueNameSource = "default";
+            hasQueue = true;
         }
 
         // Log configuration (with secrets redacted)
         System.out.println("=== Configuration ===");
         System.out.println("Connection String (" + connectionStringSource + "): " + redactConnectionString(connectionString));
-        System.out.println("Queue Name (" + queueNameSource + "): " + queueName);
+        if (hasQueue) {
+            System.out.println("Queue Name: " + queueName);
+        }
+        if (hasTopic) {
+            System.out.println("Topic Name: " + topicName);
+            System.out.println("Subscription Name: " + subscriptionName);
+        }
         System.out.println("=====================");
 
-        ServiceBusJmsClientTest client = new ServiceBusJmsClientTest(connectionString, queueName);
+        boolean allTestsPassed = true;
+
+        // Test queue if specified
+        if (hasQueue) {
+            System.out.println("\n########## QUEUE TEST ##########");
+            allTestsPassed &= runTest(connectionString, queueName, false, null);
+        }
+
+        // Test topic if specified
+        if (hasTopic) {
+            System.out.println("\n########## TOPIC TEST ##########");
+            allTestsPassed &= runTest(connectionString, topicName, true, subscriptionName);
+        }
+
+        // Final result
+        System.out.println("\n=== FINAL RESULT ===");
+        if (allTestsPassed) {
+            System.out.println("ALL TESTS PASSED!");
+            System.exit(0);
+        } else {
+            System.err.println("SOME TESTS FAILED!");
+            System.exit(1);
+        }
+    }
+
+    /**
+     * Runs a send/receive test for a queue or topic
+     * 
+     * @return true if test passed, false otherwise
+     */
+    private static boolean runTest(String connectionString, String destinationName, boolean useTopic, String subscriptionName) {
+        String destType = useTopic ? "Topic" : "Queue";
+        System.out.println("Testing " + destType + ": " + destinationName);
+        if (useTopic) {
+            System.out.println("Subscription: " + subscriptionName);
+        }
+
+        ServiceBusJmsClientTest client = useTopic
+            ? new ServiceBusJmsClientTest(connectionString, destinationName, true, subscriptionName)
+            : new ServiceBusJmsClientTest(connectionString, destinationName);
 
         try {
             // Initialize connection
@@ -261,7 +351,7 @@ public class ServiceBusJmsClientTest {
             }
 
             // Assert all sent messages were received
-            System.out.println("\n=== Test Results ===");
+            System.out.println("\n=== " + destType + " Test Results ===");
             System.out.println("Messages Sent: " + sentMessages.size());
             System.out.println("Messages Received: " + receivedMessages.size());
             
@@ -274,17 +364,17 @@ public class ServiceBusJmsClientTest {
             }
             
             if (allReceived && receivedMessages.size() == sentMessages.size()) {
-                System.out.println("TEST PASSED: All sent messages were received!");
-                System.exit(0);
+                System.out.println(destType.toUpperCase() + " TEST PASSED: All sent messages were received!");
+                return true;
             } else {
-                System.err.println("TEST FAILED: Not all messages were received or extra messages found");
-                System.exit(1);
+                System.err.println(destType.toUpperCase() + " TEST FAILED: Not all messages were received or extra messages found");
+                return false;
             }
 
         } catch (JMSException e) {
             System.err.println("JMS Error: " + e.getMessage());
             e.printStackTrace();
-            System.exit(1);
+            return false;
         } finally {
             client.close();
         }
